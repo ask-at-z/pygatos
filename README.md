@@ -113,17 +113,14 @@ os.environ["CEREBRAS_API_KEY"] = "your-api-key"
 
 config = GATOSConfig()
 config.llm.backend = "cerebras"
-config.llm.model = "llama-3.3-70b"  # or "llama-3.1-8b", "qwen-3-32b"
+config.llm.model = "gpt-oss-120b"  # or "llama-3.1-8b", "qwen-3-32b"
 
 # Create the LLM backend
 llm = config.llm.create_backend()
 ```
 
 Available Cerebras models:
-- `llama-3.3-70b` - Best quality, largest model
-- `llama-3.1-70b` - High quality
-- `llama-3.1-8b` - Fast, smaller model
-- `qwen-3-32b` - Qwen 3 32B model
+- `gpt-oss-120b` - seems to work well
 
 ## Architecture
 
