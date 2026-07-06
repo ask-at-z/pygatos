@@ -53,6 +53,18 @@ class OllamaBackend(BaseLLM):
         self.default_max_tokens = max_tokens
         self.timeout = timeout
         self.debug = debug
+        # Disable "thinking" for structured-output calls. Thinking models (Qwen3.x, Gemma 4,
+        # etc.) otherwise generate long reasoning blocks on EVERY call — 7-16x slower and the
+        # source of most JSON parse failures. GATOS never uses the reasoning, so we turn it
+        # off at generation time (Ollama ignores `think` for non-thinking models like the
+        # qwen3-instruct baseline, so this is safe across the board).
+        self.think = False
+        # Retries for generate_json: modern "thinking"/verbose models (Qwen3.x, Gemma 4,
+        # etc.) intermittently emit unparseable output at temperature>0 (reasoning blocks,
+        # prose, malformed JSON). Without retries a single bad sample silently drops a
+        # suggested code or a novelty decision, corrupting the codebook. 3 attempts makes
+        # the LLM I/O robust across models without changing the GATOS algorithm.
+        self.json_max_retries = 3
 
     @classmethod
     def from_config(cls, config: LLMConfig) -> "OllamaBackend":
@@ -99,6 +111,7 @@ class OllamaBackend(BaseLLM):
             "model": self._model,
             "prompt": prompt,
             "stream": False,
+            "think": self.think,
             "options": {
                 "temperature": temperature or self.default_temperature,
                 "num_predict": max_tokens or self.default_max_tokens,
@@ -195,14 +208,28 @@ class OllamaBackend(BaseLLM):
             json_system += "\n\n"
         json_system += "You must respond with valid JSON only. No additional text or explanation."
 
-        response = self.generate(
-            prompt=prompt,
-            system=json_system,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-
-        return self._parse_json_response(response)
+        # Retry on parse failure. Verbose/thinking models fail intermittently at temp>0;
+        # a re-sample (with a firmer instruction after the first failure) usually recovers.
+        last_err: Exception | None = None
+        sys_prompt = json_system
+        for attempt in range(self.json_max_retries):
+            response = self.generate(
+                prompt=prompt,
+                system=sys_prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            try:
+                return self._parse_json_response(response)
+            except ValueError as e:
+                last_err = e
+                if self.debug:
+                    logger.warning(f"generate_json parse failure (attempt {attempt+1}/"
+                                   f"{self.json_max_retries}); retrying")
+                sys_prompt = (json_system + "\n\nCRITICAL: Output ONLY a single valid JSON "
+                              "value. Do NOT include markdown code fences, <think> reasoning, "
+                              "or any prose before or after the JSON.")
+        raise last_err  # exhausted retries
 
     def _parse_json_response(self, response: str) -> dict:
         """
@@ -219,6 +246,13 @@ class OllamaBackend(BaseLLM):
         Raises:
             ValueError: If JSON cannot be extracted or parsed.
         """
+        # Strip reasoning blocks that "thinking" models (Qwen3.x, etc.) emit before the
+        # JSON payload; the braces inside them otherwise defeat the extraction regexes.
+        response = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL)
+        # Also drop a leading unclosed think block (truncated reasoning) up to </think>.
+        response = re.sub(r"^\s*<think>.*?</think>", "", response, flags=re.DOTALL)
+        response = response.strip()
+
         # Try direct parsing first
         try:
             return json.loads(response.strip())
