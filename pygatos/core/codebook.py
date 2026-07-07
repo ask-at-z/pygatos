@@ -348,6 +348,7 @@ class Codebook:
     def check_similarity_against_all(
         self,
         query_embedding: np.ndarray,
+        accepted_only: bool = False,
     ) -> tuple[float, Optional[Code], bool]:
         """
         Check similarity against all codes (accepted and rejected).
@@ -356,6 +357,8 @@ class Codebook:
 
         Args:
             query_embedding: The query embedding vector.
+            accepted_only: If True, only compare against accepted codes (skips the
+                rejected group, so past rejections cannot cascade into new ones).
 
         Returns:
             Tuple of (max_similarity, most_similar_code, is_accepted).
@@ -375,13 +378,14 @@ class Codebook:
                     is_accepted = True
 
         # Check rejected codes
-        for code in self.rejected_codes:
-            if code.embedding is not None:
-                sim = self._cosine_similarity(query_embedding, code.embedding)
-                if sim > max_sim:
-                    max_sim = sim
-                    most_similar = code
-                    is_accepted = False
+        if not accepted_only:
+            for code in self.rejected_codes:
+                if code.embedding is not None:
+                    sim = self._cosine_similarity(query_embedding, code.embedding)
+                    if sim > max_sim:
+                        max_sim = sim
+                        most_similar = code
+                        is_accepted = False
 
         return max_sim, most_similar, is_accepted
 

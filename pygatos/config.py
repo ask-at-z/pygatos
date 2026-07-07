@@ -112,6 +112,16 @@ class NoveltyConfig:
     include_rejected_in_rag: bool = True
     """Whether to include rejected codes in Stage 2 RAG context."""
 
+    temperature: Optional[float] = None
+    """Optional temperature override for Stage 2 LLM novelty decisions. None uses the
+    backend default (typically 0.7); 0.0 makes decisions deterministic given identical
+    context, removing sampling noise from accept/reject verdicts."""
+
+    stage1_compare_accepted_only: bool = False
+    """If True, Stage 1 auto-rejection compares only against ACCEPTED codes. The default
+    (False, original behavior) also compares against previously REJECTED codes, which makes
+    rejection contagious: one wrongly-rejected code auto-rejects every later similar code."""
+
 
 @dataclass
 class ApplicationConfig:
@@ -125,8 +135,9 @@ class ApplicationConfig:
 class LLMConfig:
     """Configuration for LLM backend."""
 
-    backend: Literal["ollama", "cerebras"] = "ollama"
-    """Which LLM backend to use: 'ollama' for local inference, 'cerebras' for cloud API."""
+    backend: Literal["ollama", "cerebras", "openrouter"] = "ollama"
+    """Which LLM backend to use: 'ollama' for local inference, 'cerebras' or 'openrouter'
+    for cloud APIs."""
 
     model: str = "qwen3:30b-a3b-instruct-2507-q4_K_M"
     """Model name. For Ollama, use local model names. For Cerebras, use 'llama-3.3-70b', etc."""
@@ -170,6 +181,10 @@ class LLMConfig:
             from pygatos.llm.cerebras import CerebrasBackend
 
             return CerebrasBackend.from_config(self)
+        elif self.backend == "openrouter":
+            from pygatos.llm.openrouter import OpenRouterBackend
+
+            return OpenRouterBackend.from_config(self)
         else:
             raise ValueError(f"Unknown LLM backend: {self.backend}")
 

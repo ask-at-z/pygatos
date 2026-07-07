@@ -67,6 +67,7 @@ class NoveltyEvaluator:
         include_rejected_in_rag: bool = True,
         system_prompt: Optional[str] = None,
         user_prompt: Optional[str] = None,
+        stage1_compare_accepted_only: bool = False,
     ):
         """
         Initialize the novelty evaluator.
@@ -82,6 +83,9 @@ class NoveltyEvaluator:
             include_rejected_in_rag: Whether to include rejected codes in Stage 2 RAG context.
             system_prompt: Optional custom system prompt. If provided, overrides prompt_version.
             user_prompt: Optional custom user prompt. Must contain {code_name}, {code_definition}, {existing_codes}.
+            stage1_compare_accepted_only: If True, Stage 1 auto-rejection compares only
+                against accepted codes. Default False (original behavior) also compares
+                against rejected codes, which makes rejection contagious.
         """
         self.llm = llm
         self.embedder = embedder
@@ -91,6 +95,7 @@ class NoveltyEvaluator:
         self.prompt_version = prompt_version
         self.study_context = study_context
         self.include_rejected_in_rag = include_rejected_in_rag
+        self.stage1_compare_accepted_only = stage1_compare_accepted_only
         self._evaluation_counter = 0  # Track evaluation order
 
         # Use custom prompts if provided, otherwise select based on version
@@ -201,7 +206,8 @@ class NoveltyEvaluator:
             logger.info("  Stage 1: Semantic similarity check")
 
         max_similarity, most_similar, is_from_accepted = codebook.check_similarity_against_all(
-            code.embedding
+            code.embedding,
+            accepted_only=self.stage1_compare_accepted_only,
         )
 
         if verbose:

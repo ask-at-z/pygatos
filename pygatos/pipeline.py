@@ -161,11 +161,13 @@ class GATOSPipeline:
                 embedder=self.embedder,
                 similarity_threshold=self.config.novelty.similarity_threshold,
                 top_k_rag=self.config.novelty.top_k_rag,
+                temperature=self.config.novelty.temperature,
                 prompt_version=2,  # Use v2 (stricter) by default
                 study_context=self.config.study_context,
                 include_rejected_in_rag=self.config.novelty.include_rejected_in_rag,
                 system_prompt=self.config.novelty_evaluation_system_prompt,
                 user_prompt=self.config.novelty_evaluation_user_prompt,
+                stage1_compare_accepted_only=self.config.novelty.stage1_compare_accepted_only,
             )
         return self._novelty_evaluator
 
