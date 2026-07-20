@@ -13,7 +13,10 @@ from pygatos.generation.novelty_evaluator import NoveltyEvaluator
 from pygatos.prompts import (
     THEME_SUGGESTION_SYSTEM,
     THEME_SUGGESTION_PROMPT,
+    THEME_ASSIGNMENT_SYSTEM,
+    THEME_ASSIGNMENT_PROMPT,
     format_codes_for_prompt,
+    format_themes_for_prompt,
     add_study_context,
 )
 
@@ -328,6 +331,119 @@ class ThemeGenerator:
                     logger.info(f"    Rejected theme: {theme.name}")
 
         return accepted_themes
+
+    def assign_codes_to_themes(
+        self,
+        codebook: Codebook,
+        top_k: int = 5,
+        confidence_threshold: float = 0.8,
+        validate: bool = True,
+        verbose: bool = False,
+    ) -> dict:
+        """
+        (Re)assign each accepted code to its single best-fitting theme.
+
+        Restores the per-code assignment + validation step from the original Auto-QDA
+        design. Cluster-then-name leaves a code's theme fixed to whichever cluster it fell
+        into (never re-checked); this revisits every code:
+
+        1. Rank the existing themes by embedding cosine similarity to the code
+           (both embedded as "name: definition").
+        2. If the top match's similarity >= ``confidence_threshold``, assign it directly.
+        3. Otherwise, if ``validate``, ask the LLM to choose among the top-k candidate
+           themes (it may answer NONE, in which case the embedding top match is kept).
+
+        Mutates ``code.theme`` and rebuilds each ``theme.codes`` membership list in place.
+
+        Args:
+            codebook: Codebook with accepted codes and themes.
+            top_k: Candidate themes shown to the LLM for a low-confidence code.
+            confidence_threshold: Cosine at/above which a code is assigned without the LLM.
+            validate: If False, always assign the top embedding match (no LLM).
+            verbose: If True, log each reassignment.
+
+        Returns:
+            Report dict: n_codes, n_moves, moved (list of {code, from, to, confidence,
+            method}), n_llm_calls, theme_sizes_before, theme_sizes_after.
+        """
+        themes = codebook.themes
+        codes = codebook.accepted_codes
+        if len(themes) < 2 or not codes:
+            return {"n_codes": len(codes), "n_moves": 0, "moved": [], "n_llm_calls": 0,
+                    "theme_sizes_before": {}, "theme_sizes_after": {}}
+
+        top_k = max(1, min(top_k, len(themes)))
+        sizes_before = {t.name: sum(1 for c in codes if c.theme == t.name) for t in themes}
+
+        # Embed themes ("name: definition") and codes; L2-normalize for cosine.
+        for t in themes:
+            if t.embedding is None:
+                t.embedding = self.embedder.embed(f"{t.name}: {t.definition}")
+        self._embed_codes(codes)
+        theme_names = [t.name for t in themes]
+        theme_mat = np.vstack([np.asarray(t.embedding, dtype=float) for t in themes])
+        theme_mat = theme_mat / (np.linalg.norm(theme_mat, axis=1, keepdims=True) + 1e-12)
+
+        moved, n_llm = [], 0
+        for code in codes:
+            cvec = np.asarray(code.embedding, dtype=float)
+            cvec = cvec / (np.linalg.norm(cvec) + 1e-12)
+            sims = theme_mat @ cvec
+            order = np.argsort(-sims)
+            top1 = int(order[0])
+            old = code.theme
+            chosen, conf, method = theme_names[top1], float(sims[top1]), "embedding"
+
+            if validate and sims[top1] < confidence_threshold:
+                cand = [themes[int(i)] for i in order[:top_k]]
+                pick = self._llm_pick_theme(code, cand, verbose)
+                n_llm += 1
+                if pick and pick in theme_names:
+                    chosen, method = pick, "llm"
+                    conf = float(sims[theme_names.index(pick)])
+
+            code.theme = chosen
+            if chosen != old:
+                moved.append({"code": code.name, "from": old, "to": chosen,
+                              "confidence": round(conf, 3), "method": method})
+                if verbose:
+                    logger.info(f"  reassigned '{code.name}': {old} -> {chosen} "
+                                f"({method}, conf {conf:.3f})")
+
+        # Rebuild theme membership from the (possibly updated) code.theme values.
+        by_theme: dict[str, list] = {t.name: [] for t in themes}
+        for code in codes:
+            by_theme.setdefault(code.theme, []).append(code)
+        for t in themes:
+            t.codes = by_theme.get(t.name, [])
+
+        sizes_after = {t.name: len(t.codes) for t in themes}
+        if verbose:
+            logger.info(f"Reassigned {len(moved)}/{len(codes)} codes ({n_llm} LLM calls)")
+        return {"n_codes": len(codes), "n_moves": len(moved), "moved": moved,
+                "n_llm_calls": n_llm, "theme_sizes_before": sizes_before,
+                "theme_sizes_after": sizes_after}
+
+    def _llm_pick_theme(self, code: Code, candidate_themes: list, verbose: bool = False):
+        """Ask the LLM to choose the best theme for a code among candidates; None on failure."""
+        prompt = THEME_ASSIGNMENT_PROMPT.format(
+            code_name=code.name,
+            code_definition=code.definition,
+            themes=format_themes_for_prompt(candidate_themes, include_definition=True),
+        )
+        system = add_study_context(THEME_ASSIGNMENT_SYSTEM, self.study_context)
+        try:
+            response = self.llm.generate_json(
+                prompt=prompt, system=system,
+                temperature=self.temperature if self.temperature is not None else 0.0,
+            )
+            best = (response.get("best_theme") or "").strip()
+            if not best or best.upper() == "NONE":
+                return None
+            return best
+        except Exception as e:
+            logger.warning(f"  theme-assignment LLM failed for '{code.name}': {e}")
+            return None
 
     def __repr__(self) -> str:
         return f"ThemeGenerator(n_clusters={self.n_clusters})"

@@ -389,6 +389,15 @@ class GATOSPipeline:
 
             if verbose:
                 logger.info(f"  Generated {len(themes)} themes")
+
+            # Step 8b: optional per-code best-theme (re)assignment + validation.
+            if self.config.theme.refine_after_generation:
+                if verbose:
+                    logger.info("[Step 8b] Refining code -> theme assignments...")
+                report = self.reassign_code_themes(codebook, verbose=False)
+                if verbose:
+                    logger.info(f"  Reassigned {report['n_moves']}/{report['n_codes']} codes "
+                                f"({report['n_llm_calls']} LLM calls)")
         else:
             if verbose:
                 logger.info("\n[Step 8] Skipping theme generation")
@@ -406,6 +415,34 @@ class GATOSPipeline:
             logger.info(f"  Themes: {len(codebook.themes)}")
 
         return codebook
+
+    def reassign_code_themes(
+        self,
+        codebook: Codebook,
+        verbose: bool = True,
+    ) -> dict:
+        """
+        (Re)assign each accepted code to its best-fitting theme (per-code assignment +
+        LLM validation), using the settings in ``config.theme``.
+
+        Runs on a codebook that already has themes (e.g. one just generated, or one loaded
+        from disk). Mutates codes' ``theme`` and rebuilds theme membership in place.
+
+        Args:
+            codebook: Codebook with accepted codes and themes.
+            verbose: If True, log each reassignment.
+
+        Returns:
+            Report dict from ThemeGenerator.assign_codes_to_themes (moves, sizes, counts).
+        """
+        tc = self.config.theme
+        return self.theme_generator.assign_codes_to_themes(
+            codebook,
+            top_k=tc.assignment_top_k,
+            confidence_threshold=tc.assignment_confidence_threshold,
+            validate=tc.validate_assignments,
+            verbose=verbose,
+        )
 
     def apply_codebook(
         self,

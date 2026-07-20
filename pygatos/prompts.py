@@ -206,6 +206,24 @@ Respond in JSON format:
     "definition": "Definition of what this theme represents."
 }}"""
 
+THEME_ASSIGNMENT_SYSTEM = """You are an expert qualitative researcher assigning a single code to the theme it best belongs under.
+Choose the ONE theme whose meaning most fully encompasses the code. Judge by conceptual fit, not surface word overlap.
+If none of the candidate themes is a reasonable home for the code, answer NONE."""
+
+THEME_ASSIGNMENT_PROMPT = """A qualitative code must be placed under the single best-fitting theme.
+
+CODE:
+{code_name}: {code_definition}
+
+CANDIDATE THEMES (pick exactly one by name, or NONE):
+{themes}
+
+Respond in JSON format:
+{{
+    "best_theme": "<the exact theme name from the list above, or NONE>",
+    "reasoning": "<one concise sentence on why it fits>"
+}}"""
+
 # ============================================================================
 # CODE APPLICATION PROMPTS
 # ============================================================================
@@ -839,6 +857,18 @@ def format_codes_for_prompt(codes: list, include_definition: bool = True) -> str
         else:
             lines.append(f"{i}. {name}")
 
+    return "\n".join(lines)
+
+
+def format_themes_for_prompt(themes: list, include_definition: bool = True) -> str:
+    """Format a list of themes (name + definition) as a numbered list for a prompt."""
+    lines = []
+    for i, theme in enumerate(themes, 1):
+        name = theme.name if hasattr(theme, "name") else theme.get("name", theme)
+        definition = ""
+        if include_definition:
+            definition = theme.definition if hasattr(theme, "definition") else theme.get("definition", "")
+        lines.append(f"{i}. {name}: {definition}" if definition else f"{i}. {name}")
     return "\n".join(lines)
 
 

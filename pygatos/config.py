@@ -132,6 +132,36 @@ class ApplicationConfig:
 
 
 @dataclass
+class ThemeConfig:
+    """Configuration for post-hoc code -> theme (re)assignment.
+
+    After themes are generated (by clustering + naming), this optional stage revisits
+    each accepted code and places it under its single best-fitting theme: rank themes by
+    embedding cosine similarity, keep the top match when it is confident, and defer the
+    low-confidence codes to the LLM, which chooses among the top-k candidate themes. This
+    restores the per-code assignment + validation step from the original Auto-QDA design,
+    which cluster-then-name alone does not provide (a code's theme is otherwise just the
+    cluster it fell into, never re-checked against the other themes)."""
+
+    assignment_top_k: int = 5
+    """Number of candidate themes (by embedding similarity) shown to the LLM for a
+    low-confidence code. Capped at the number of themes."""
+
+    assignment_confidence_threshold: float = 0.8
+    """If a code's top theme match has cosine similarity >= this, assign it directly
+    (no LLM call). Below it, the LLM adjudicates among the top-k candidates."""
+
+    validate_assignments: bool = True
+    """If True, low-confidence codes are routed to the LLM to pick the best theme.
+    If False, every code is assigned to its top embedding match (pure similarity)."""
+
+    refine_after_generation: bool = False
+    """If True, generate_themes() runs this reassignment as a final step. Default False so
+    existing pipeline behavior (and reproducibility of prior runs) is unchanged; call
+    pipeline.reassign_code_themes() explicitly, or opt in via this flag."""
+
+
+@dataclass
 class LLMConfig:
     """Configuration for LLM backend."""
 
@@ -239,6 +269,9 @@ class GATOSConfig:
 
     application: ApplicationConfig = field(default_factory=ApplicationConfig)
     """Configuration for codebook application."""
+
+    theme: ThemeConfig = field(default_factory=ThemeConfig)
+    """Configuration for post-hoc code -> theme (re)assignment."""
 
     llm: LLMConfig = field(default_factory=LLMConfig)
     """Configuration for LLM backend."""
