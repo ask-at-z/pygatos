@@ -656,6 +656,102 @@ class GATOSPipeline:
             verbose=verbose,
         )
 
+    @staticmethod
+    def save_application_provenance(
+        results: list,
+        ids: list,
+        output_dir: Union[str, Path],
+        include_text: bool = True,
+    ) -> dict[str, Path]:
+        """
+        Persist the per-information-point application record and the document x code incidence.
+
+        ``apply_codebook`` returns only marginal counts, but margins do not determine the joint
+        distribution: without the incidence matrix there is no co-occurrence, no per-document unit
+        of analysis, no confidence interval, and no way to trace a prevalence figure back to the
+        excerpt that produced it. Judgment failures are also recorded separately — an empty
+        applied-code list from a failed call is otherwise indistinguishable from "no codes apply"
+        and silently deflates every count.
+
+        Writes:
+        - ``prevalence_assignments.csv`` — long-form document x code incidence (ids + code names
+          only, no text; safe to share alongside a paper).
+        - ``application_points.csv`` — one row per information point: candidates considered, codes
+          applied, and judgment status (no text).
+        - ``application_points_restricted.jsonl`` — the same rows plus point text, interpretation
+          and analysis. SENSITIVE: inherits the corpus's confidentiality. Omitted when
+          ``include_text=False``.
+
+        Args:
+            results: ApplicationResult objects (from ``apply_codebook_with_details``).
+            ids: Document ids aligned with ``results``.
+            output_dir: Destination directory.
+            include_text: If False, skip the restricted text-bearing file.
+        """
+        import csv
+        import json as _json
+
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        inc_path = output_dir / "prevalence_assignments.csv"
+        pts_path = output_dir / "application_points.csv"
+        restricted_path = output_dir / "application_points_restricted.jsonl"
+
+        n_points = n_failed = 0
+        with inc_path.open("w", newline="") as f_inc, pts_path.open("w", newline="") as f_pts:
+            w_inc = csv.writer(f_inc)
+            w_inc.writerow(["document_id", "code", "theme"])
+            w_pts = csv.writer(f_pts)
+            w_pts.writerow(["document_id", "point_index", "n_candidates", "candidate_codes",
+                            "n_applied", "applied_codes", "judgment_failed"])
+            f_res = restricted_path.open("w", encoding="utf-8") if include_text else None
+            try:
+                for doc_id, res in zip(ids, results):
+                    if res is None:
+                        continue
+                    # document-level incidence (a code counts once per document)
+                    seen = set()
+                    for c in getattr(res, "applied_codes", []) or []:
+                        if c.name not in seen:
+                            seen.add(c.name)
+                            w_inc.writerow([doc_id, c.name, getattr(c, "theme", None)])
+                    for pi, pr in enumerate(getattr(res, "point_results", []) or []):
+                        n_points += 1
+                        failed = bool(getattr(pr, "judgment_failed", False))
+                        n_failed += int(failed)
+                        applied = [c.name for c in (pr.applied_codes or [])]
+                        cands = [c.name for c in (pr.candidate_codes or [])]
+                        w_pts.writerow([doc_id, pi, len(cands), "|".join(cands),
+                                        len(applied), "|".join(applied), failed])
+                        if f_res is not None:
+                            f_res.write(_json.dumps({
+                                "document_id": doc_id, "point_index": pi,
+                                "information_point": pr.information_point,
+                                "candidate_codes": cands, "applied_codes": applied,
+                                "judgment_failed": failed,
+                                "point_interpretation": pr.point_interpretation,
+                                "analysis": pr.analysis,
+                                "chunk_index": getattr(pr, "chunk_index", None),
+                                "chunk_text": getattr(pr, "chunk_text", None),
+                            }, ensure_ascii=False, default=str) + "\n")
+            finally:
+                if f_res is not None:
+                    f_res.close()
+
+        summary = {"n_documents": len(results), "n_points": n_points,
+                   "n_judgment_failures": n_failed}
+        (output_dir / "application_summary.json").write_text(_json.dumps(summary, indent=2))
+        out = {"incidence": inc_path, "points": pts_path,
+               "summary": output_dir / "application_summary.json"}
+        if include_text:
+            out["restricted"] = restricted_path
+        if n_failed:
+            logger.warning(
+                f"{n_failed}/{n_points} information points had LLM judgment failures; these are "
+                f"recorded (judgment_failed=True) and must NOT be read as 'no codes apply'.")
+        return out
+
     def apply_codebook(
         self,
         data: Union[str, Path, pd.DataFrame],
