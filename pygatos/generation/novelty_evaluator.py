@@ -174,6 +174,17 @@ class NoveltyEvaluator:
             code.similar_to = stage1_result.most_similar_code.name if stage1_result.most_similar_code else None
             return stage1_result
 
+        # Preserve the STAGE-1 measurement before stage 2 overwrites it. Stage 1's max similarity
+        # is the value actually compared against similarity_threshold; overwriting it left the
+        # persisted similarity_score/similar_to holding stage-2 values, so the number that drove
+        # the gate decision was unrecoverable from the saved codebook.
+        if not code.metadata:
+            code.metadata = {}
+        code.metadata["stage1_max_similarity"] = stage1_result.max_similarity
+        code.metadata["stage1_most_similar"] = (
+            stage1_result.most_similar_code.name if stage1_result.most_similar_code else None)
+        code.metadata["stage1_threshold"] = self.similarity_threshold
+
         # Stage 2: LLM evaluation with RAG
         stage2_result = self._stage2_llm_evaluation(code, codebook, verbose)
 

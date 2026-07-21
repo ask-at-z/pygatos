@@ -20,6 +20,7 @@ from pygatos.core import (
 from pygatos.llm.base import BaseLLM
 from pygatos.cache import CacheManager
 from pygatos.generation import CodeSuggester, NoveltyEvaluator, ThemeGenerator
+from pygatos import provenance as _prov
 
 logger = logging.getLogger(__name__)
 
@@ -251,7 +252,8 @@ class GATOSPipeline:
             point_structured = {}          # global point idx -> InformationPoint (lineage)
 
             for i, text in enumerate(texts):
-                result = self.summarizer.summarize(text, verbose=False)
+                with _prov.stage("summarization", item=ids[i]):
+                    result = self.summarizer.summarize(text, verbose=False)
                 if collect_provenance:
                     extraction_by_id[ids[i]] = result
                 structured = result.structured_points or []
@@ -343,6 +345,7 @@ class GATOSPipeline:
 
         codebook = Codebook()
         all_suggested = []
+        cluster_outcomes = []   # provenance: per-cluster code-generation outcome
 
         # Filter out noise cluster
         valid_clusters = {k: v for k, v in clusters.items() if k != -1}
@@ -357,12 +360,20 @@ class GATOSPipeline:
             )
 
         for cluster_id, cluster_texts in cluster_iter:
-            codes = self.code_suggester.suggest_codes(
-                cluster_texts=cluster_texts,
-                cluster_id=cluster_id,
-                verbose=False,
-            )
+            with _prov.stage("code_suggestion", item=cluster_id):
+                codes = self.code_suggester.suggest_codes(
+                    cluster_texts=cluster_texts,
+                    cluster_id=cluster_id,
+                    verbose=False,
+                )
 
+            cluster_outcomes.append({
+                "cluster_id": int(cluster_id),
+                "n_points": len(cluster_texts),
+                "n_codes_returned": len(codes),
+                "code_names": [c.name for c in codes],
+                "status": "ok" if codes else "no_codes_returned",
+            })
             all_suggested.extend(codes)
 
         if verbose:
@@ -384,7 +395,8 @@ class GATOSPipeline:
             )
 
         for code in code_iter:
-            result = self.novelty_evaluator.evaluate(code, codebook, verbose=False)
+            with _prov.stage("novelty_evaluation", item=code.name):
+                result = self.novelty_evaluator.evaluate(code, codebook, verbose=False)
 
             if result.is_novel:
                 codebook.add_code(code, accepted=True)
@@ -414,6 +426,7 @@ class GATOSPipeline:
                 code.metadata["source_essays"] = essays
                 code.metadata["source_point_indices"] = pt_idx
                 code.metadata["n_source_points"] = len(pt_idx)
+            n_noise = sum(1 for l in labels_list if l == -1)
             self.provenance = {
                 "extraction_by_id": extraction_by_id,      # essay_id -> SummarizationResult
                 "point_to_source": point_to_source,        # global point idx -> essay_id
@@ -421,6 +434,33 @@ class GATOSPipeline:
                 "all_points": all_points,                  # global point idx -> text
                 "labels": labels_list,                     # global point idx -> cluster_id
                 "ids": ids,
+                # Numerical checkpoints. Re-embedding is NOT bit-identical across processes or
+                # devices, so the exact partition cannot be reproduced without these arrays.
+                "embeddings": embeddings,
+                "cluster_embeddings": cluster_embeddings,
+                "pipeline_state": {
+                    "n_information_points": len(all_points),
+                    "embedding_model": self.config.embedding.model_name,
+                    "embedding_device": getattr(self.config.embedding, "device", None),
+                    "embedding_dim": int(embeddings.shape[1]) if hasattr(embeddings, "shape") else None,
+                    "dim_reduction_applied": bool(
+                        hasattr(cluster_embeddings, "shape") and hasattr(embeddings, "shape")
+                        and cluster_embeddings.shape[1] != embeddings.shape[1]),
+                    "reduced_dim": int(cluster_embeddings.shape[1]) if hasattr(cluster_embeddings, "shape") else None,
+                    "skip_dim_reduction_arg": skip_dim_reduction,
+                    "clustering": {
+                        "method": getattr(self.config.clustering, "method", None),
+                        "n_clusters_resolved": int(n_clusters) if n_clusters is not None else None,
+                        "n_clusters_found": len(set(labels_list) - {-1}),
+                        "n_noise_points": n_noise,
+                        "max_clusters_arg": max_clusters,
+                    },
+                    "clusters": cluster_outcomes,
+                    "n_clusters_yielding_no_codes": sum(
+                        1 for c in cluster_outcomes if c["status"] != "ok"),
+                    "random_seed": self.config.random_seed,
+                    "llm_seed": getattr(self.config.llm, "seed", None),
+                },
             }
             if verbose:
                 logger.info(f"  Provenance captured for {len(extraction_by_id)} documents, "
@@ -431,7 +471,8 @@ class GATOSPipeline:
             if verbose:
                 logger.info("\n[Step 8] Generating themes...")
 
-            themes = self.theme_generator.generate_themes(codebook, verbose=False)
+            with _prov.stage("theme_generation"):
+                themes = self.theme_generator.generate_themes(codebook, verbose=False)
 
             if verbose:
                 logger.info(f"  Generated {len(themes)} themes")
@@ -536,7 +577,43 @@ class GATOSPipeline:
         grounding_path = output_dir / "code_grounding.json"
         grounding_path.write_text(json.dumps(grounding, indent=2, ensure_ascii=False))
 
-        return {"extraction": extraction_path, "code_grounding": grounding_path}
+        written = {"extraction": extraction_path, "code_grounding": grounding_path}
+
+        # 3) pipeline_state.json — the reduction/clustering parameters actually used plus the
+        #    per-cluster code-generation outcome (clusters that yielded no codes are otherwise
+        #    invisible in every artifact).
+        state = prov.get("pipeline_state")
+        if state is not None:
+            state_path = output_dir / "pipeline_state.json"
+            state_path.write_text(json.dumps(state, indent=2, default=str))
+            written["pipeline_state"] = state_path
+
+        # 4) embeddings.npz — the vectors and the reduced matrix actually handed to the clusterer,
+        #    with labels and the point->document index. Re-embedding is NOT bit-identical across
+        #    processes/devices, so the recorded partition cannot be reproduced from text alone.
+        emb = prov.get("embeddings")
+        if emb is not None:
+            import hashlib as _hashlib
+            import numpy as _np
+            red = prov.get("cluster_embeddings")
+            n = len(all_points)
+            emb_path = output_dir / "embeddings.npz"
+            _np.savez_compressed(
+                emb_path,
+                vectors=_np.asarray(emb, dtype=_np.float32),
+                reduced=(_np.asarray(red, dtype=_np.float32) if red is not None
+                         else _np.empty((0, 0), dtype=_np.float32)),
+                labels=_np.asarray(prov.get("labels", []), dtype=_np.int32),
+                point_index=_np.arange(n, dtype=_np.int32),
+                essay_id=_np.array([str(point_to_source.get(i, "")) for i in range(n)]),
+                point_sha256=_np.array([
+                    _hashlib.sha256(str(all_points[i]).encode("utf-8")).hexdigest()
+                    for i in range(n)
+                ]),
+            )
+            written["embeddings"] = emb_path
+
+        return written
 
     @staticmethod
     def load_extraction_results(path: Union[str, Path]) -> dict:

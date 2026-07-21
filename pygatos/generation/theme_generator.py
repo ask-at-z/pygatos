@@ -389,7 +389,7 @@ class ThemeGenerator:
         theme_mat = np.vstack([np.asarray(t.embedding, dtype=float) for t in themes])
         theme_mat = theme_mat / (np.linalg.norm(theme_mat, axis=1, keepdims=True) + 1e-12)
 
-        moved, n_llm = [], 0
+        moved, decisions, n_llm = [], [], 0
         for code in codes:
             cvec = np.asarray(code.embedding, dtype=float)
             cvec = cvec / (np.linalg.norm(cvec) + 1e-12)
@@ -398,16 +398,35 @@ class ThemeGenerator:
             top1 = int(order[0])
             old = code.theme
             chosen, conf, method = theme_names[top1], float(sims[top1]), "embedding"
+            disposition = "confident_no_llm"
+            llm_pick = None
 
             if validate and sims[top1] < confidence_threshold:
                 cand = [themes[int(i)] for i in order[:top_k]]
-                pick = self._llm_pick_theme(code, cand, verbose)
+                llm_pick = self._llm_pick_theme(code, cand, verbose)
                 n_llm += 1
-                if pick and pick in theme_names:
-                    chosen, method = pick, "llm"
-                    conf = float(sims[theme_names.index(pick)])
+                if llm_pick and llm_pick in theme_names:
+                    chosen, method = llm_pick, "llm"
+                    conf = float(sims[theme_names.index(llm_pick)])
+                    disposition = "llm_pick"
+                elif llm_pick is None:
+                    # NONE / parse failure / exception all fall back to the embedding top match;
+                    # distinguishing them matters when auditing why a code did not move.
+                    disposition = "llm_none_or_failed"
+                else:
+                    disposition = "llm_out_of_vocab"
 
             code.theme = chosen
+            # Record EVERY code, not just movers: otherwise the number of adjudications has no
+            # honest denominator (an LLM call that confirmed the existing theme is invisible).
+            decisions.append({
+                "code": code.name, "from": old, "to": chosen, "moved": chosen != old,
+                "disposition": disposition, "method": method,
+                "top1_theme": theme_names[top1], "top1_cosine": float(sims[top1]),
+                "chosen_cosine": conf,
+                "llm_raw_pick": llm_pick,
+                "all_similarities": {theme_names[i]: float(sims[i]) for i in range(len(theme_names))},
+            })
             if chosen != old:
                 moved.append({"code": code.name, "from": old, "to": chosen,
                               "confidence": round(conf, 3), "method": method})
@@ -426,8 +445,13 @@ class ThemeGenerator:
         if verbose:
             logger.info(f"Reassigned {len(moved)}/{len(codes)} codes ({n_llm} LLM calls)")
         return {"n_codes": len(codes), "n_moves": len(moved), "moved": moved,
+                "decisions": decisions,          # every code, moved or not
                 "n_llm_calls": n_llm, "theme_sizes_before": sizes_before,
-                "theme_sizes_after": sizes_after}
+                "theme_sizes_after": sizes_after,
+                "disposition_counts": {
+                    d: sum(1 for x in decisions if x["disposition"] == d)
+                    for d in sorted({x["disposition"] for x in decisions})
+                }}
 
     def _llm_pick_theme(self, code: Code, candidate_themes: list, verbose: bool = False):
         """Ask the LLM to choose the best theme for a code among candidates; None on failure."""
