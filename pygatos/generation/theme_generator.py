@@ -234,6 +234,10 @@ class ThemeGenerator:
                 name=name,
                 definition=definition,
                 codes=codes.copy(),
+                # Stamp the originating code-cluster. Previously never set, so every persisted
+                # theme carried source_cluster=None and the partition that induced the themes
+                # was unrecoverable from the saved codebook.
+                source_cluster=cluster_id,
             )
 
             # Set theme reference in codes
@@ -252,6 +256,7 @@ class ThemeGenerator:
                 name=f"Theme {cluster_id}",
                 definition=f"Auto-generated theme for cluster {cluster_id}",
                 codes=codes.copy(),
+                source_cluster=cluster_id,
             )
 
     def _deduplicate_themes(

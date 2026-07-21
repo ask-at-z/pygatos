@@ -139,8 +139,8 @@ class CerebrasBackend(BaseLLM):
         chat_completion = self.client.chat.completions.create(
             messages=messages,
             model=self._model,
-            temperature=temperature or self.default_temperature,
-            max_tokens=max_tokens or self.default_max_tokens,
+            temperature=temperature if temperature is not None else self.default_temperature,
+            max_tokens=max_tokens if max_tokens is not None else self.default_max_tokens,
         )
 
         response_text = chat_completion.choices[0].message.content
@@ -176,8 +176,8 @@ class CerebrasBackend(BaseLLM):
         chat_completion = self.client.chat.completions.create(
             messages=messages,
             model=self._model,
-            temperature=temperature or self.default_temperature,
-            max_tokens=max_tokens or self.default_max_tokens,
+            temperature=temperature if temperature is not None else self.default_temperature,
+            max_tokens=max_tokens if max_tokens is not None else self.default_max_tokens,
         )
 
         response_text = chat_completion.choices[0].message.content

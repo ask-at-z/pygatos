@@ -193,6 +193,14 @@ class LLMConfig:
     rate_limit_delay: float = 0.1
     """Seconds to wait between API calls for rate-limited backends like Cerebras free tier (30 req/min)."""
 
+    seed: Optional[int] = None
+    """Sampling seed forwarded to the LLM backend (Ollama ``options.seed``).
+
+    Distinct from GATOSConfig.random_seed, which seeds numpy/UMAP/clustering ONLY and never
+    reaches the model. Set this to make LLM sampling reproducible; leave None for unseeded
+    sampling. Note that a seed makes sampling *reproducible*, not deterministic across
+    different server/model builds."""
+
     def create_backend(self):
         """
         Create and return the appropriate LLM backend based on configuration.

@@ -4,9 +4,12 @@ from dataclasses import dataclass, field
 from typing import Optional
 from datetime import datetime
 import json
+import logging
 
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -207,6 +210,8 @@ class Codebook:
         self.rejected_themes: list[Theme] = []  # Rejected themes during novelty eval
         self.created_at: datetime = datetime.now()
         self.metadata: dict = {}
+        # Codes discarded by add_code because their name already existed (see add_code).
+        self.dropped_codes: list[dict] = []
 
         # Cache for embeddings
         self._accepted_embeddings_cache: Optional[np.ndarray] = None
@@ -219,15 +224,37 @@ class Codebook:
         Args:
             code: The code to add.
             accepted: If True, add to accepted codes; if False, add to rejected.
+
+        Note:
+            ``Code.__eq__`` compares by NAME only, so a later code reusing an existing name is
+            dropped even when its definition differs. That de-duplication is intentional (names
+            key the codebook) but it IS data loss — the novelty gate may have accepted the code
+            being dropped. Every drop is therefore recorded in ``self.dropped_codes`` so counts
+            reconcile (accepted + rejected + dropped == evaluated) and the loss is auditable
+            rather than silent.
         """
-        if accepted:
-            if code not in self.accepted_codes:
-                self.accepted_codes.append(code)
+        target = self.accepted_codes if accepted else self.rejected_codes
+        if code not in target:
+            target.append(code)
+            if accepted:
                 self._accepted_embeddings_cache = None  # Invalidate cache
-        else:
-            if code not in self.rejected_codes:
-                self.rejected_codes.append(code)
+            else:
                 self._rejected_embeddings_cache = None  # Invalidate cache
+        else:
+            existing = next((c for c in target if c.name == code.name), None)
+            self.dropped_codes.append({
+                "name": code.name,
+                "definition": code.definition,
+                "would_be_accepted": accepted,
+                "reason": "duplicate_name",
+                "kept_definition": existing.definition if existing else None,
+                "source_cluster": code.source_cluster,
+                "evaluation_order": code.evaluation_order,
+            })
+            logger.warning(
+                f"Dropped code '{code.name}' ({'accepted' if accepted else 'rejected'} branch): "
+                f"name already present. Recorded in codebook.dropped_codes."
+            )
 
     def add_theme(self, theme: Theme, accepted: bool = True) -> None:
         """
@@ -465,6 +492,8 @@ class Codebook:
             "rejected_themes": [t.to_dict() for t in self.rejected_themes],
             "created_at": self.created_at.isoformat(),
             "metadata": self.metadata,
+            # Codes discarded on name collision (see add_code) — persisted so counts reconcile.
+            "dropped_codes": self.dropped_codes,
         }
 
     @classmethod
@@ -474,6 +503,7 @@ class Codebook:
 
         codebook.accepted_codes = [Code.from_dict(c) for c in data.get("accepted_codes", [])]
         codebook.rejected_codes = [Code.from_dict(c) for c in data.get("rejected_codes", [])]
+        codebook.dropped_codes = list(data.get("dropped_codes", []))
         codebook.themes = [Theme.from_dict(t) for t in data.get("themes", [])]
         codebook.rejected_themes = [Theme.from_dict(t) for t in data.get("rejected_themes", [])]
 

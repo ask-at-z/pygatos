@@ -37,6 +37,15 @@ class PointApplicationResult:
     candidate_codes: list[Code]
     point_interpretation: Optional[str] = None
     analysis: Optional[str] = None
+
+    @property
+    def judgment_failed(self) -> bool:
+        """True if the LLM judgment errored (as opposed to genuinely applying no codes).
+
+        Without this, an empty ``applied_codes`` conflates "model judged that nothing applies"
+        with "the call/parse failed", silently deflating prevalence counts.
+        """
+        return bool(self.analysis and self.analysis.startswith("__JUDGMENT_FAILED__"))
     point_embedding: Optional[np.ndarray] = None
     # Lineage tracking fields (populated when using apply_to_points)
     chunk_index: Optional[int] = None
@@ -517,8 +526,13 @@ class CodeApplier:
             return applied, point_interpretation, analysis
 
         except Exception as e:
+            # IMPORTANT: a failure here previously returned an empty applied-code list, which is
+            # indistinguishable downstream from a genuine "no codes apply" judgment. That biases
+            # every prevalence figure monotonically DOWNWARD by an unbounded, unmeasurable amount.
+            # Surface the failure in the analysis field so callers can separate the two and count
+            # failures explicitly (see PointApplicationResult.judgment_failed).
             logger.error(f"  LLM judgment failed for point: {e}")
-            return [], None, None
+            return [], None, f"__JUDGMENT_FAILED__: {type(e).__name__}: {e}"
 
     def apply_to_points(
         self,

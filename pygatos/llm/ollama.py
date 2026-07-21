@@ -35,6 +35,7 @@ class OllamaBackend(BaseLLM):
         max_tokens: int = 2048,
         timeout: int = 120,
         debug: bool = False,
+        seed: Optional[int] = None,
     ):
         """
         Initialize the Ollama backend.
@@ -46,6 +47,9 @@ class OllamaBackend(BaseLLM):
             max_tokens: Default maximum tokens to generate.
             timeout: Request timeout in seconds.
             debug: If True, log all prompts and responses.
+            seed: Optional sampling seed forwarded to Ollama as options.seed. Without it, sampling
+                is unseeded regardless of any pipeline-level random_seed (which only governs
+                numpy/UMAP/clustering, not the LLM).
         """
         self._model = model
         self.base_url = base_url.rstrip("/")
@@ -53,6 +57,7 @@ class OllamaBackend(BaseLLM):
         self.default_max_tokens = max_tokens
         self.timeout = timeout
         self.debug = debug
+        self.seed = seed
         # Disable "thinking" for structured-output calls. Thinking models (Qwen3.x, Gemma 4,
         # etc.) otherwise generate long reasoning blocks on EVERY call — 7-16x slower and the
         # source of most JSON parse failures. GATOS never uses the reasoning, so we turn it
@@ -66,6 +71,21 @@ class OllamaBackend(BaseLLM):
         # the LLM I/O robust across models without changing the GATOS algorithm.
         self.json_max_retries = 3
 
+    def _options(self, temperature: Optional[float], max_tokens: Optional[int]) -> dict:
+        """Resolve per-call sampling options.
+
+        NOTE: uses ``is not None`` rather than ``or`` — ``0.0 or 0.7`` evaluates to 0.7 in Python,
+        which silently discarded every explicitly-requested temperature of 0.0 (deterministic
+        adjudication steps were in fact sampling at the default temperature).
+        """
+        opts = {
+            "temperature": temperature if temperature is not None else self.default_temperature,
+            "num_predict": max_tokens if max_tokens is not None else self.default_max_tokens,
+        }
+        if self.seed is not None:
+            opts["seed"] = self.seed
+        return opts
+
     @classmethod
     def from_config(cls, config: LLMConfig) -> "OllamaBackend":
         """Create an OllamaBackend from a configuration object."""
@@ -76,6 +96,7 @@ class OllamaBackend(BaseLLM):
             max_tokens=config.max_tokens,
             timeout=config.timeout,
             debug=config.debug,
+            seed=getattr(config, "seed", None),
         )
 
     @property
@@ -112,10 +133,7 @@ class OllamaBackend(BaseLLM):
             "prompt": prompt,
             "stream": False,
             "think": self.think,
-            "options": {
-                "temperature": temperature or self.default_temperature,
-                "num_predict": max_tokens or self.default_max_tokens,
-            },
+            "options": self._options(temperature, max_tokens),
         }
 
         if system:
@@ -165,10 +183,7 @@ class OllamaBackend(BaseLLM):
             "model": self._model,
             "messages": messages,
             "stream": False,
-            "options": {
-                "temperature": temperature or self.default_temperature,
-                "num_predict": max_tokens or self.default_max_tokens,
-            },
+            "options": self._options(temperature, max_tokens),
         }
 
         response = requests.post(url, json=payload, timeout=self.timeout)
