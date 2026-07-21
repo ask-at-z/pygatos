@@ -49,6 +49,25 @@ class InformationPoint:
     chunk_index: Optional[int] = None
     chunk_text: Optional[str] = None
 
+    def to_dict(self) -> dict:
+        """Serialize to a plain dict (round-trips with from_dict). Preserves lineage."""
+        return {
+            "text": self.text,
+            "source_text": self.source_text,
+            "chunk_index": self.chunk_index,
+            "chunk_text": self.chunk_text,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "InformationPoint":
+        """Reconstruct from a dict produced by to_dict()."""
+        return cls(
+            text=data["text"],
+            source_text=data.get("source_text", ""),
+            chunk_index=data.get("chunk_index"),
+            chunk_text=data.get("chunk_text"),
+        )
+
     def __str__(self) -> str:
         """Return the information point text."""
         return self.text

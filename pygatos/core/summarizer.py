@@ -42,6 +42,36 @@ class SummarizationResult:
     n_chunks: int
     structured_points: list[InformationPoint] = field(default_factory=list)
 
+    def to_dict(self, include_original_text: bool = True) -> dict:
+        """Serialize to a plain dict (round-trips with from_dict).
+
+        Args:
+            include_original_text: If False, omit the full original_text (it is recoverable
+                from ``chunks`` and duplicates sensitive source text). ``structured_points``
+                still carry their own source/chunk lineage.
+        """
+        return {
+            "original_text": self.original_text if include_original_text else None,
+            "chunks": self.chunks,
+            "generic_summaries": self.generic_summaries,
+            "information_points": self.information_points,
+            "n_chunks": self.n_chunks,
+            "structured_points": [p.to_dict() for p in self.structured_points],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "SummarizationResult":
+        """Reconstruct from a dict produced by to_dict(). structured_points are rehydrated
+        into InformationPoint objects so the result is usable by apply_to_points()."""
+        return cls(
+            original_text=data.get("original_text") or "",
+            chunks=data.get("chunks", []),
+            generic_summaries=data.get("generic_summaries", []),
+            information_points=data.get("information_points", []),
+            n_chunks=data.get("n_chunks", len(data.get("chunks", [])) or 1),
+            structured_points=[InformationPoint.from_dict(p) for p in data.get("structured_points", [])],
+        )
+
 
 class Summarizer:
     """

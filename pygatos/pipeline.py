@@ -83,6 +83,9 @@ class GATOSPipeline:
         self._novelty_evaluator = None
         self._theme_generator = None
 
+        # Populated by generate_codebook(collect_provenance=True); see save_provenance().
+        self.provenance: Optional[dict] = None
+
     @property
     def llm(self) -> BaseLLM:
         """Get or create LLM backend based on config."""
@@ -193,6 +196,7 @@ class GATOSPipeline:
         generate_themes: bool = True,
         max_clusters: Optional[int] = None,
         verbose: bool = True,
+        collect_provenance: bool = False,
     ) -> Codebook:
         """
         Generate a codebook from text data.
@@ -210,6 +214,10 @@ class GATOSPipeline:
             generate_themes: If True, generate themes from accepted codes.
             max_clusters: Maximum number of clusters to process (for testing).
             verbose: If True, log progress information.
+            collect_provenance: If True, retain the full extraction->cluster->code chain on
+                ``self.provenance`` and stamp each code's metadata with the source documents and
+                information points that produced it. Serialize with ``save_provenance()``. Off by
+                default (unchanged behavior + no extra memory for callers that don't need audit trails).
 
         Returns:
             Codebook with accepted codes (and themes if generated).
@@ -239,12 +247,19 @@ class GATOSPipeline:
 
             all_points = []
             point_to_source = {}
+            extraction_by_id = {}          # essay_id -> SummarizationResult (provenance)
+            point_structured = {}          # global point idx -> InformationPoint (lineage)
 
             for i, text in enumerate(texts):
                 result = self.summarizer.summarize(text, verbose=False)
-
-                for point in result.information_points:
-                    point_to_source[len(all_points)] = ids[i]
+                if collect_provenance:
+                    extraction_by_id[ids[i]] = result
+                structured = result.structured_points or []
+                for j, point in enumerate(result.information_points):
+                    idx = len(all_points)
+                    point_to_source[idx] = ids[i]
+                    if collect_provenance and j < len(structured):
+                        point_structured[idx] = structured[j]
                     all_points.append(point)
 
             if verbose:
@@ -257,6 +272,9 @@ class GATOSPipeline:
 
             texts_to_embed = texts
             point_to_source = {i: ids[i] for i in range(len(texts))}
+            all_points = texts
+            extraction_by_id = {}
+            point_structured = {}
 
         # Step 3: Embedding
         if verbose:
@@ -380,6 +398,34 @@ class GATOSPipeline:
             dedup_rate = rejected / len(all_suggested) * 100 if all_suggested else 0
             logger.info(f"  Deduplication rate: {dedup_rate:.1f}%")
 
+        # Step 7b: Provenance — link every code back to its source points and documents.
+        if collect_provenance:
+            labels_list = [int(x) for x in labels]
+            cluster_points: dict[int, list] = {}
+            for idx, lab in enumerate(labels_list):
+                cluster_points.setdefault(lab, []).append(idx)
+            for code in list(codebook.accepted_codes) + list(codebook.rejected_codes):
+                cid = code.source_cluster
+                pt_idx = cluster_points.get(cid, []) if cid is not None else []
+                essays = sorted({point_to_source.get(i) for i in pt_idx
+                                 if point_to_source.get(i) is not None}, key=str)
+                if not code.metadata:
+                    code.metadata = {}
+                code.metadata["source_essays"] = essays
+                code.metadata["source_point_indices"] = pt_idx
+                code.metadata["n_source_points"] = len(pt_idx)
+            self.provenance = {
+                "extraction_by_id": extraction_by_id,      # essay_id -> SummarizationResult
+                "point_to_source": point_to_source,        # global point idx -> essay_id
+                "point_structured": point_structured,      # global point idx -> InformationPoint
+                "all_points": all_points,                  # global point idx -> text
+                "labels": labels_list,                     # global point idx -> cluster_id
+                "ids": ids,
+            }
+            if verbose:
+                logger.info(f"  Provenance captured for {len(extraction_by_id)} documents, "
+                            f"{len(all_points)} information points")
+
         # Step 8: Theme generation (optional)
         if generate_themes and len(codebook.accepted_codes) >= 2:
             if verbose:
@@ -415,6 +461,95 @@ class GATOSPipeline:
             logger.info(f"  Themes: {len(codebook.themes)}")
 
         return codebook
+
+    def save_provenance(self, codebook: Codebook, output_dir: Union[str, Path]) -> dict[str, Path]:
+        """
+        Serialize the generation provenance (the document -> window -> summary -> point -> cluster ->
+        code chain) captured when generate_codebook(collect_provenance=True) was run.
+
+        Writes two files into ``output_dir``:
+
+        - ``extraction.json`` — per document: chunks (windows), per-window generic summaries, and the
+          structured information points with full lineage (text, chunk index, chunk text). Rehydrate
+          with ``load_extraction_results()`` to reuse these exact points during code application.
+        - ``code_grounding.json`` — per code (accepted and rejected): the source cluster, the source
+          documents, and the actual information-point texts that induced it — the audit trail linking
+          every code back to the evidence it came from.
+
+        NOTE: both files contain text derived from the source documents and must be handled with the
+        same confidentiality as the source corpus (do not commit / egress for sensitive data).
+
+        Args:
+            codebook: The codebook returned by the matching generate_codebook(collect_provenance=True).
+            output_dir: Directory to write the two JSON files into.
+
+        Returns a dict mapping name -> written path. Raises if no provenance was collected.
+        """
+        import json
+        if not self.provenance:
+            raise RuntimeError(
+                "No provenance available. Run generate_codebook(collect_provenance=True) first."
+            )
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        prov = self.provenance
+
+        # 1) extraction.json — per-document windows/summaries/points (rehydratable)
+        extraction = {
+            str(essay_id): result.to_dict(include_original_text=False)
+            for essay_id, result in prov["extraction_by_id"].items()
+        }
+        extraction_path = output_dir / "extraction.json"
+        extraction_path.write_text(json.dumps(extraction, indent=2, ensure_ascii=False))
+
+        # 2) code_grounding.json — code -> source documents + the information points that induced it
+        all_points = prov["all_points"]
+        point_to_source = prov["point_to_source"]
+        point_structured = prov.get("point_structured", {})
+
+        def _points_for(indices: list) -> list:
+            out = []
+            for i in indices:
+                sp = point_structured.get(i)
+                out.append({
+                    "point_index": i,
+                    "text": all_points[i] if i < len(all_points) else None,
+                    "essay_id": point_to_source.get(i),
+                    "chunk_index": getattr(sp, "chunk_index", None) if sp else None,
+                    "chunk_text": getattr(sp, "chunk_text", None) if sp else None,
+                })
+            return out
+
+        grounding = []
+        for accepted, code in ([(True, c) for c in codebook.accepted_codes] +
+                               [(False, c) for c in codebook.rejected_codes]):
+            md = code.metadata or {}
+            grounding.append({
+                "code": code.name,
+                "accepted": accepted,
+                "theme": getattr(code, "theme", None),
+                "source_cluster": code.source_cluster,
+                "n_source_points": md.get("n_source_points", 0),
+                "source_essays": md.get("source_essays", []),
+                "source_information_points": _points_for(md.get("source_point_indices", [])),
+            })
+        grounding_path = output_dir / "code_grounding.json"
+        grounding_path.write_text(json.dumps(grounding, indent=2, ensure_ascii=False))
+
+        return {"extraction": extraction_path, "code_grounding": grounding_path}
+
+    @staticmethod
+    def load_extraction_results(path: Union[str, Path]) -> dict:
+        """
+        Load ``extraction.json`` (written by save_provenance) back into a dict of
+        ``{essay_id: SummarizationResult}`` with structured_points rehydrated, suitable for
+        ``apply_codebook_with_details(extraction_results=...)`` to reuse the exact information points
+        from generation (no re-extraction).
+        """
+        import json
+        from pygatos.core.summarizer import SummarizationResult
+        data = json.loads(Path(path).read_text())
+        return {essay_id: SummarizationResult.from_dict(d) for essay_id, d in data.items()}
 
     def reassign_code_themes(
         self,
