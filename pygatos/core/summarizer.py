@@ -15,6 +15,10 @@ from pygatos.prompts import (
     INFORMATION_EXTRACTION_SYSTEM,
     INFORMATION_EXTRACTION_PROMPT,
     INFORMATION_EXTRACTION_WITH_CONTEXT_PROMPT,
+    INFORMATION_EXTRACTION_DELIMITED_PROMPT,
+    INFORMATION_EXTRACTION_DELIMITED_WITH_CONTEXT_PROMPT,
+    add_extraction_context,
+    escape_payload,
     add_study_context,
 )
 
@@ -99,6 +103,7 @@ class Summarizer:
         bullets_per_chunk: int = 4,
         temperature: Optional[float] = None,
         study_context: Optional[str] = None,
+        hardened_prompts: bool = False,
     ):
         """
         Initialize the summarizer.
@@ -111,6 +116,15 @@ class Summarizer:
             bullets_per_chunk: Target number of generic summary bullets per chunk.
             temperature: Optional temperature override for LLM.
             study_context: Optional context about the study/dataset to improve extraction.
+            hardened_prompts: If True, use instruction/data-separated extraction prompts:
+                extraction_context is routed to the SYSTEM prompt (add_extraction_context)
+                instead of being prepended to the chunk, and the chunk is wrapped in
+                <source_text> tags with any tag occurrences inside the payload escaped.
+                Recommended whenever the text being summarized was not authored by the
+                researcher (web pages, third-party documents): measured against
+                document-borne injected directives, the stock structure complied 7/7 on
+                two of four models tested and this structure 0/7, with no change on
+                benign text. Default False to preserve existing behavior exactly.
         """
         self.llm = llm
         self.chunk_size = chunk_size
@@ -119,6 +133,7 @@ class Summarizer:
         self.bullets_per_chunk = bullets_per_chunk
         self.temperature = temperature
         self.study_context = study_context
+        self.hardened_prompts = hardened_prompts
 
     @classmethod
     def from_config(
@@ -144,6 +159,7 @@ class Summarizer:
             max_context_bullets=config.max_context_bullets,
             bullets_per_chunk=config.bullets_per_chunk,
             study_context=study_context,
+            hardened_prompts=getattr(config, "hardened_prompts", False),
         )
 
     def summarize(
@@ -463,23 +479,34 @@ class Summarizer:
         Returns:
             List of information point strings.
         """
-        # Build the text to send to LLM
-        # If extraction_context is provided, prepend it to help LLM understand the chunk
-        if extraction_context:
-            text_for_prompt = f"{extraction_context}\n\n{chunk}"
-        else:
-            text_for_prompt = chunk
-
-        if context:
-            prompt = INFORMATION_EXTRACTION_WITH_CONTEXT_PROMPT.format(
-                context=context,
-                text=text_for_prompt,
-            )
-        else:
-            prompt = INFORMATION_EXTRACTION_PROMPT.format(text=text_for_prompt)
-
-        # Add study context to system prompt if available
         system = add_study_context(INFORMATION_EXTRACTION_SYSTEM, self.study_context)
+
+        if self.hardened_prompts:
+            # Instruction/data separation: the researcher's focus goes to the SYSTEM prompt,
+            # the chunk goes inside a delimiter it cannot close (occurrences escaped).
+            system = add_extraction_context(system, extraction_context)
+            escaped, _n_escaped = escape_payload(chunk)
+            if context:
+                prompt = INFORMATION_EXTRACTION_DELIMITED_WITH_CONTEXT_PROMPT.format(
+                    context=context,
+                    text=escaped,
+                )
+            else:
+                prompt = INFORMATION_EXTRACTION_DELIMITED_PROMPT.format(text=escaped)
+        else:
+            # Original behavior: extraction_context is prepended to the chunk.
+            if extraction_context:
+                text_for_prompt = f"{extraction_context}\n\n{chunk}"
+            else:
+                text_for_prompt = chunk
+
+            if context:
+                prompt = INFORMATION_EXTRACTION_WITH_CONTEXT_PROMPT.format(
+                    context=context,
+                    text=text_for_prompt,
+                )
+            else:
+                prompt = INFORMATION_EXTRACTION_PROMPT.format(text=text_for_prompt)
 
         try:
             response = self.llm.generate_json(

@@ -20,6 +20,11 @@ class SummarizationConfig:
     bullets_per_chunk: int = 4
     """Target number of generic summary bullets per chunk."""
 
+    hardened_prompts: bool = False
+    """Use instruction/data-separated extraction prompts (extraction focus in the SYSTEM
+    prompt; chunk wrapped in <source_text> tags with tag occurrences escaped). Recommended
+    for text not authored by the researcher. Default False preserves existing behavior."""
+
 
 @dataclass
 class EmbeddingConfig:
