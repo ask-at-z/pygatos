@@ -318,6 +318,40 @@ def corpus_metadata(df, text_column: str, id_column: Optional[str], source_path:
     }
 
 
+def consolidation_settings(pipeline) -> dict:
+    """The consolidation step's effective settings (Step 7 novelty evaluation), for the manifest.
+
+    Exists because a run's consolidation configuration was historically only derivable by reading
+    the code that launched it: replays that recorded their settings were auditable a month later,
+    inline runs were not. Every field is read off the LIVE evaluator (which has already resolved
+    policy/version/override precedence), not off the config the caller thinks it passed.
+
+    Temperature is recorded as requested (None = defer to backend) alongside the backend's own
+    default, rather than imputing one effective number -- an imputation whose justification lives
+    only in code is exactly the failure this module exists to prevent.
+    """
+    ev = pipeline.novelty_evaluator
+    cfg = pipeline.config
+    return {
+        "policy": ev.policy,
+        "prompt_version": ev.prompt_version,
+        "custom_prompt_override": (
+            getattr(cfg, "novelty_evaluation_system_prompt", None) is not None
+            or getattr(cfg, "novelty_evaluation_user_prompt", None) is not None
+        ),
+        "similarity_threshold": ev.similarity_threshold,
+        "top_k_rag": ev.top_k_rag,
+        "include_rejected_in_rag": ev.include_rejected_in_rag,
+        "stage1_compare_accepted_only": ev.stage1_compare_accepted_only,
+        "requested_temperature": ev.temperature,
+        "backend_default_temperature": getattr(cfg.llm, "temperature", None),
+        "study_context_present": ev.study_context is not None,
+        "study_context_sha256": sha256_text(ev.study_context),
+        "system_prompt_sha256": sha256_text(ev._system_prompt),
+        "user_prompt_sha256": sha256_text(ev._user_prompt),
+    }
+
+
 def resolved_prompts(pipeline) -> dict:
     """Snapshot the prompt templates actually in force on the live objects.
 

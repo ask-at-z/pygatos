@@ -172,6 +172,7 @@ class GATOSPipeline:
                 system_prompt=self.config.novelty_evaluation_system_prompt,
                 user_prompt=self.config.novelty_evaluation_user_prompt,
                 stage1_compare_accepted_only=self.config.novelty.stage1_compare_accepted_only,
+                policy=self.config.novelty.policy,
             )
         return self._novelty_evaluator
 
@@ -460,6 +461,7 @@ class GATOSPipeline:
                         1 for c in cluster_outcomes if c["status"] != "ok"),
                     "random_seed": self.config.random_seed,
                     "llm_seed": getattr(self.config.llm, "seed", None),
+                    "consolidation_settings": _prov.consolidation_settings(self),
                 },
             }
             if verbose:
