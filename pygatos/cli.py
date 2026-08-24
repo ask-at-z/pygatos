@@ -1,12 +1,14 @@
 """Command-line interface for pygatos."""
 
 import argparse
+import json
 import logging
 import sys
 from datetime import datetime
 from pathlib import Path
 
 from pygatos import GATOSPipeline, GATOSConfig
+from pygatos import provenance
 from pygatos.io import (
     load_csv,
     load_data,
@@ -26,6 +28,14 @@ from pygatos.visualization import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _pygatos_version() -> str:
+    try:
+        from importlib.metadata import version
+        return version("pygatos")
+    except Exception:
+        return "unknown"
 
 
 def setup_logging(verbose: bool = False, debug: bool = False) -> None:
@@ -88,6 +98,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
         return 1
 
     # Filter out empty/very short responses
+    n_raw_rows = len(df)
     df = df[df[args.text_column].notna()]
     df = df[df[args.text_column].astype(str).str.len() > 5]
 
@@ -113,11 +124,14 @@ def run_pipeline(args: argparse.Namespace) -> int:
         config.llm.debug = True
     if args.context:
         config.study_context = args.context
+    if args.novelty_policy:
+        config.novelty.policy = args.novelty_policy
 
     logger.info(f"  Embedding model: {config.embedding.model_name}")
     logger.info(f"  LLM model: {config.llm.model}")
     logger.info(f"  Cluster size: {config.clustering.target_cluster_size}")
     logger.info(f"  Similarity threshold: {config.novelty.similarity_threshold}")
+    logger.info(f"  Novelty policy: {config.novelty.policy}")
     logger.info(f"  Top-K for application: {config.application.top_k}")
     if config.study_context:
         logger.info(f"  Study context: {config.study_context[:50]}...")
@@ -131,6 +145,46 @@ def run_pipeline(args: argparse.Namespace) -> int:
         return 1
 
     logger.info("Pipeline initialized successfully")
+
+    # Forward-path provenance: record every LLM HTTP attempt, and write a run manifest.
+    # The call log contains the corpus text sent to the model, so it inherits the corpus's
+    # confidentiality. Disable with --no-llm-log; the manifest records which way it ran.
+    llm_recorder = None
+    if not args.no_llm_log:
+        llm_recorder = provenance.LLMCallRecorder(output_dir / "llm_calls.jsonl")
+        llm_recorder.attach(pipeline.llm)
+        logger.info(f"  LLM call log: {output_dir / 'llm_calls.jsonl'}")
+
+    manifest_path = output_dir / "manifest.json"
+
+    def write_manifest(**extra) -> None:
+        manifest = {
+            "pygatos_version": _pygatos_version(),
+            "package_git": provenance.git_metadata(Path(__file__).resolve().parents[1]),
+            "environment": provenance.environment_metadata(),
+            "corpus": provenance.corpus_metadata(
+                df, args.text_column, args.id_column, data_path, n_raw=n_raw_rows,
+                filter_description="dropped rows with missing text or <= 5 characters",
+            ),
+            "llm_backend": {
+                "backend": config.llm.backend,
+                "model": config.llm.model,
+                "temperature": config.llm.temperature,
+                "seed": config.llm.seed,
+            },
+            "consolidation_settings": provenance.consolidation_settings(pipeline),
+            "resolved_prompts": provenance.resolved_prompts(pipeline),
+            "llm_calls_logged": llm_recorder is not None,
+        }
+        if config.llm.backend == "ollama":
+            manifest["ollama"] = provenance.ollama_metadata(config.llm.base_url, config.llm.model)
+        manifest.update(extra)
+        manifest_path.write_text(json.dumps(manifest, indent=2, default=str))
+
+    # Written now so a killed run still leaves its settings on disk; rewritten with
+    # stats when the run completes.
+    write_manifest(status="in_progress")
+    logger.info(f"  Saved: {manifest_path.name}")
 
     # Generate codebook
     logger.info("")
@@ -308,6 +362,13 @@ def run_pipeline(args: argparse.Namespace) -> int:
     )
     logger.info(f"  Saved: run_metadata.json")
 
+    write_manifest(
+        status="complete",
+        llm_call_stats=llm_recorder.stats() if llm_recorder else None,
+    )
+    if llm_recorder:
+        llm_recorder.close()
+
     # Summary
     logger.info("")
     logger.info("=" * 70)
@@ -401,6 +462,22 @@ Examples:
         "--context",
         type=str,
         help="Brief description of the dataset/study to improve LLM understanding (e.g., 'Survey responses about inflation concerns from US adults')",
+    )
+
+    run_parser.add_argument(
+        "--novelty-policy",
+        choices=["reject-unless-distinct", "keep-unless-duplicate"],
+        help=(
+            "Instructed policy for the Step-7 consolidation decision. "
+            "'reject-unless-distinct' (default) is the published behavior; "
+            "'keep-unless-duplicate' is the validated higher-recall repair "
+            "(larger codebook; audit duplication with pygatos.diagnostics)"
+        ),
+    )
+    run_parser.add_argument(
+        "--no-llm-log",
+        action="store_true",
+        help="Do not write llm_calls.jsonl (the per-call prompt/response record)",
     )
 
     # Skip options

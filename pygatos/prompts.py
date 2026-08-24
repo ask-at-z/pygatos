@@ -183,6 +183,58 @@ Respond in JSON format:
     "is_novel": true/false
 }}"""
 
+# Keep-unless-duplicate policy (the validated MS1 repair).
+#
+# VERBATIM port of experiments/pygatos-live-eval/arm_prompts/armB_novelty.json (mars-algo-v2
+# repo, frozen 2026-07-07; upstreamed 2026-08-19). Every validated number in the consolidation
+# manuscript was produced by this exact wording -- do NOT edit, paraphrase, or reflow these two
+# strings. tests/test_novelty_policy.py pins their SHA-256.
+#
+# Replaces the V2 policy above ("SUBSET -> reject", "When in doubt, REJECT"), which multi-seed
+# evaluation showed discards specifically-named codes matching human ground-truth themes
+# (recall 0.38-0.61 accepted vs 0.92-1.00 present in suggestions). Policy here: reject ONLY
+# true duplicates (same concept at the same granularity); a more specific code alongside a
+# broader one is valuable, mirroring how human coders keep e.g. Food/Gas/Housing alongside
+# general financial strain.
+NOVELTY_EVALUATION_SYSTEM_KEEP_UNLESS_DUPLICATE = """You are an expert qualitative researcher deciding whether a proposed code should be added to a codebook.
+
+A good inductive codebook captures BOTH broad patterns and the specific, recurring concepts within them - human coders routinely keep a specific code (e.g. 'Rising Food Costs') alongside a related broader one (e.g. 'Financial Strain'), because the specific code preserves an analytically important distinction that the broad code cannot.
+
+REJECT only if the proposed code is a TRUE DUPLICATE:
+1. SAME CONCEPT, SAME GRANULARITY: an existing code already expresses this exact idea at the same level of specificity, just worded differently.
+2. NO NEW APPLICATION: there is no text excerpt a careful coder would tag with the proposed code but not with the duplicate.
+
+ACCEPT in every other case, including when:
+- The proposed code is a SPECIFIC INSTANCE of a broader existing code (a distinct sub-concept is worth its own code).
+- The proposed code is BROADER than existing specific codes (a genuine umbrella concept is worth its own code).
+- The proposed code overlaps partially with an existing code but has a distinct core idea.
+
+Do not reject a code merely because it is related to, overlaps with, or falls under an existing code. Redundancy means interchangeable, not related."""
+
+NOVELTY_EVALUATION_PROMPT_KEEP_UNLESS_DUPLICATE = """Decide whether the following proposed code should be added to the codebook.
+
+PROPOSED CODE:
+Name: {code_name}
+Definition: {code_definition}
+
+EXISTING SIMILAR CODES (most similar from codebook):
+{existing_codes}
+
+ANALYSIS STEPS:
+1. Core concept: what specific idea does the proposed code capture, and at what level of specificity?
+2. Duplicate check: is there an existing code expressing the SAME idea at the SAME granularity (i.e., the two codes would be applied interchangeably)?
+3. Distinction check: name at least one kind of text excerpt that the proposed code would capture and label more precisely than any existing code. If such excerpts exist, the code is novel.
+
+IMPORTANT: Complete your analysis FIRST, then decide. A specific code under a broader existing code is NOVEL, not redundant.
+
+Respond in JSON format:
+{{
+    "similar_to": "Name of most similar existing code, or null if none",
+    "reasoning": "Your step-by-step analysis following the steps above",
+    "is_novel": true/false
+}}"""
+
+
 # ============================================================================
 # THEME GENERATION PROMPTS
 # ============================================================================

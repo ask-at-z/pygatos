@@ -108,6 +108,25 @@ class ClusteringConfig:
 class NoveltyConfig:
     """Configuration for novelty evaluation."""
 
+    policy: Literal["reject-unless-distinct", "keep-unless-duplicate"] = "reject-unless-distinct"
+    """Instructed novelty policy for the Stage 2 consolidation decision.
+
+    - "reject-unless-distinct" (default): the published policy (prompt V2) -- reject a candidate
+      that is a specific instance of a broader code; when in doubt, reject. This is the behavior
+      the GATOS paper shipped and what its pinned reproductions expect; it is kept as the default
+      so published runs stay reproducible.
+    - "keep-unless-duplicate": the validated repair -- reject only true duplicates (same concept
+      at the same granularity); a specific code under a broader one is novel. Multi-seed factorial
+      evaluation on two model stacks showed this single instruction change moves ground-truth
+      recall by +0.25 to +0.27 (~9 SE) with no overlap between policies; the other consolidation
+      levers (threshold, comparison set, retrieval context, temperature) had no effect outside the
+      noise floor. Known cost: the codebook grows to 3-8x the human codebook, and on weak
+      generator models the judged duplicate rate rises -- measure it with
+      pygatos.diagnostics.duplicate_rate (no ground truth needed).
+
+    Mutually exclusive with the custom novelty prompt overrides on GATOSConfig
+    (novelty_evaluation_system_prompt / novelty_evaluation_user_prompt): setting both raises."""
+
     similarity_threshold: float = 0.8
     """Cosine similarity threshold for auto-rejection in Stage 1."""
 

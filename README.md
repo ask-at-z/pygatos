@@ -80,6 +80,14 @@ config.clustering.n_clusters = 50
 # Customize novelty evaluation
 config.novelty.similarity_threshold = 0.8
 config.novelty.top_k_rag = 5
+
+# Consolidation policy (Step 7). The default, "reject-unless-distinct", is the published
+# GATOS behavior: reject a candidate code that is a specific instance of a broader code.
+# Multi-seed factorial evaluation showed that policy is the pipeline's dominant recall
+# bottleneck; the validated repair below changes only the instruction and moves
+# ground-truth recall by +0.25 to +0.27. Cost: the codebook grows 3-8x, so audit
+# duplication with pygatos.diagnostics (below).
+config.novelty.policy = "keep-unless-duplicate"
 ```
 
 ## LLM Backends
@@ -121,6 +129,31 @@ llm = config.llm.create_backend()
 
 Available Cerebras models:
 - `gpt-oss-120b` - seems to work well
+
+## Diagnostics
+
+`pygatos.diagnostics.compute_duplicate_rate` measures the judged true-duplicate rate of a
+codebook — a parsimony check that needs **no ground truth**, which makes it the deployment
+diagnostic for the `keep-unless-duplicate` policy (its known failure mode is duplication on
+weak generator models). Use a judge model **different from the generator**; a local Ollama
+judge keeps confidential corpora on-machine.
+
+```python
+from pygatos.config import LLMConfig
+from pygatos.core import Embedder
+from pygatos.diagnostics import compute_duplicate_rate
+
+judge = LLMConfig(model="gpt-oss:120b").create_backend()  # != generator model
+report = compute_duplicate_rate(
+    codebook.accepted_codes, judge, Embedder(config.embedding),
+    generator_model=config.llm.model,
+)
+print(report["dupe_rate"])  # single-judge rule; per-pair labels in report["pairs"]
+```
+
+Every CLI run also writes `manifest.json` (effective consolidation settings, prompt hashes,
+environment/corpus/model provenance) and `llm_calls.jsonl` (every prompt/response sent to the
+model; disable with `--no-llm-log`). Both inherit the confidentiality of the corpus.
 
 ## Architecture
 

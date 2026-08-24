@@ -14,9 +14,13 @@ from pygatos.prompts import (
     NOVELTY_EVALUATION_PROMPT,
     NOVELTY_EVALUATION_SYSTEM_V2,
     NOVELTY_EVALUATION_PROMPT_V2,
+    NOVELTY_EVALUATION_SYSTEM_KEEP_UNLESS_DUPLICATE,
+    NOVELTY_EVALUATION_PROMPT_KEEP_UNLESS_DUPLICATE,
     format_codes_for_prompt,
     add_study_context,
 )
+
+NOVELTY_POLICIES = ("reject-unless-distinct", "keep-unless-duplicate")
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +72,7 @@ class NoveltyEvaluator:
         system_prompt: Optional[str] = None,
         user_prompt: Optional[str] = None,
         stage1_compare_accepted_only: bool = False,
+        policy: str = "reject-unless-distinct",
     ):
         """
         Initialize the novelty evaluator.
@@ -86,6 +91,10 @@ class NoveltyEvaluator:
             stage1_compare_accepted_only: If True, Stage 1 auto-rejection compares only
                 against accepted codes. Default False (original behavior) also compares
                 against rejected codes, which makes rejection contagious.
+            policy: Instructed novelty policy for Stage 2. "reject-unless-distinct"
+                (default) keeps the published prompt-version behavior; "keep-unless-duplicate"
+                selects the validated repair prompts (see NoveltyConfig.policy). Mutually
+                exclusive with system_prompt/user_prompt overrides.
         """
         self.llm = llm
         self.embedder = embedder
@@ -96,11 +105,26 @@ class NoveltyEvaluator:
         self.study_context = study_context
         self.include_rejected_in_rag = include_rejected_in_rag
         self.stage1_compare_accepted_only = stage1_compare_accepted_only
+        self.policy = policy
         self._evaluation_counter = 0  # Track evaluation order
 
-        # Use custom prompts if provided, otherwise select based on version
+        if policy not in NOVELTY_POLICIES:
+            raise ValueError(
+                f"Unknown novelty policy {policy!r}; expected one of {NOVELTY_POLICIES}"
+            )
+        if policy != "reject-unless-distinct" and (system_prompt is not None or user_prompt is not None):
+            raise ValueError(
+                "novelty policy and custom novelty prompts are mutually exclusive: "
+                f"policy={policy!r} was set together with an explicit "
+                "system_prompt/user_prompt override, and it is ambiguous which should win. "
+                "Set one or the other."
+            )
+
+        # Prompt selection: explicit override > policy > prompt_version
         if system_prompt is not None:
             self._system_prompt = system_prompt
+        elif policy == "keep-unless-duplicate":
+            self._system_prompt = NOVELTY_EVALUATION_SYSTEM_KEEP_UNLESS_DUPLICATE
         elif prompt_version == 2:
             self._system_prompt = NOVELTY_EVALUATION_SYSTEM_V2
         else:
@@ -108,6 +132,8 @@ class NoveltyEvaluator:
 
         if user_prompt is not None:
             self._user_prompt = user_prompt
+        elif policy == "keep-unless-duplicate":
+            self._user_prompt = NOVELTY_EVALUATION_PROMPT_KEEP_UNLESS_DUPLICATE
         elif prompt_version == 2:
             self._user_prompt = NOVELTY_EVALUATION_PROMPT_V2
         else:
@@ -505,6 +531,6 @@ class NoveltyEvaluator:
 
     def __repr__(self) -> str:
         return (
-            f"NoveltyEvaluator(threshold={self.similarity_threshold}, "
+            f"NoveltyEvaluator(policy={self.policy!r}, threshold={self.similarity_threshold}, "
             f"top_k={self.top_k_rag}, prompt_v{self.prompt_version})"
         )
