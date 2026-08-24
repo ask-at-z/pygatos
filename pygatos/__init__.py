@@ -4,7 +4,7 @@ pygatos: Python library for GATOS (Generative AI-enabled Theme Organization and 
 A library for generating qualitative codebooks from text data using inductive methods.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from pygatos.config import GATOSConfig
 from pygatos.core.codebook import Code, Theme, Codebook

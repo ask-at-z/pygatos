@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (feature/novelty-policy-config)
+## 0.2.0 — 2026-08-24
 
 ### Added
 - `NoveltyConfig.policy` — first-class consolidation policy: `"reject-unless-distinct"`
