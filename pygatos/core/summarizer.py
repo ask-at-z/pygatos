@@ -564,6 +564,22 @@ class Summarizer:
 
             line = line.strip()
 
+            # This parser is the fallback when strict JSON parsing fails, so its input is often
+            # MALFORMED JSON, not bullets. Without these guards, scaffolding lines such as
+            # '"information_points": [' or '],' are kept verbatim and enter downstream pipelines
+            # as data (observed: 98 such "points" across three extraction rounds, clustering
+            # together and wasting a cluster). Drop pure JSON punctuation and key-only lines,
+            # and unwrap quoted string elements to their content.
+            if re.fullmatch(r'[{}\[\]",:]+', line):
+                continue  # pure JSON scaffolding: {  }  [  ]  ],  ",
+            if re.fullmatch(r'"[^"]*"\s*:\s*[\[{]?,?', line):
+                continue  # a JSON key line: "information_points": [
+            if line.startswith('```'):
+                continue  # markdown code fence around a JSON attempt
+            m = re.fullmatch(r'"(.*)"\s*,?', line, re.DOTALL)
+            if m:
+                line = m.group(1).strip()  # JSON string element: "text",  ->  text
+
             if line:
                 bullets.append(line)
 
