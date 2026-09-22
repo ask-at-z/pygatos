@@ -1,7 +1,7 @@
 """Two-stage novelty evaluation for codes."""
 
 import logging
-from typing import Optional, Tuple
+from typing import Optional, Sequence, Tuple
 from dataclasses import dataclass
 
 import numpy as np
@@ -36,6 +36,10 @@ class NoveltyResult:
     most_similar_code: Optional[Code]
     similar_to_accepted: bool  # Was the most similar code from accepted group?
     reasoning: Optional[str] = None
+    panel: Optional[list[dict]] = None
+    """Per-judge verdicts when a PANEL decided stage 2: one dict per judge with
+    ``model``, ``is_novel`` (None if that judge errored), ``reasoning``, ``similar_to``.
+    None when a single judge decided. ``is_novel`` above is the majority verdict."""
 
 
 class NoveltyEvaluator:
@@ -73,6 +77,8 @@ class NoveltyEvaluator:
         user_prompt: Optional[str] = None,
         stage1_compare_accepted_only: bool = False,
         policy: str = "reject-unless-distinct",
+        judges: Optional[Sequence[BaseLLM]] = None,
+        panel_max_workers: Optional[int] = None,
     ):
         """
         Initialize the novelty evaluator.
@@ -91,6 +97,17 @@ class NoveltyEvaluator:
             stage1_compare_accepted_only: If True, Stage 1 auto-rejection compares only
                 against accepted codes. Default False (original behavior) also compares
                 against rejected codes, which makes rejection contagious.
+            judges: Optional PANEL for Stage 2. When given, every judge answers the same
+                prompt (concurrently) and the MAJORITY verdict decides; ``llm`` is then used
+                only for prompt construction defaults and is not consulted. A panel removes the
+                single-judge failure mode at the one gate whose decisions are irreversible, and
+                lets the caller keep every judge different from the generator (shared-bias rule,
+                already enforced for the duplicate-rate diagnostic). Judges that error are
+                excluded from the vote; if fewer than one usable verdict remains the candidate is
+                recorded as ``stage2_error`` and NOT silently accepted. With an even number of
+                usable verdicts a tie is resolved conservatively (reject), matching the
+                single-judge error behaviour; pass an odd number of judges to avoid ties.
+            panel_max_workers: Thread pool size for panel calls (default: one per judge).
             policy: Instructed novelty policy for Stage 2. "reject-unless-distinct"
                 (default) keeps the published prompt-version behavior; "keep-unless-duplicate"
                 selects the validated repair prompts (see NoveltyConfig.policy). Mutually
@@ -106,6 +123,8 @@ class NoveltyEvaluator:
         self.include_rejected_in_rag = include_rejected_in_rag
         self.stage1_compare_accepted_only = stage1_compare_accepted_only
         self.policy = policy
+        self.judges = list(judges) if judges else None
+        self.panel_max_workers = panel_max_workers or (len(self.judges) if self.judges else 1)
         self._evaluation_counter = 0  # Track evaluation order
 
         if policy not in NOVELTY_POLICIES:
@@ -355,19 +374,37 @@ class NoveltyEvaluator:
         if verbose:
             logger.debug(f"    Prompt (v{self.prompt_version}):\n{prompt}")
 
+        panel_votes = None
         try:
-            response = self.llm.generate_json(
-                prompt=prompt,
-                system=system,
-                temperature=self.temperature,
-            )
+            if self.judges:
+                panel_votes = self._poll_panel(prompt, system, verbose)
+                usable = [v for v in panel_votes if v["is_novel"] is not None]
+                if not usable:
+                    raise RuntimeError(
+                        "every panel judge failed: "
+                        + "; ".join(f"{v['model']}: {v['reasoning']}" for v in panel_votes))
+                yes = sum(1 for v in usable if v["is_novel"])
+                is_novel = yes * 2 > len(usable)          # strict majority; ties reject
+                reasoning = " | ".join(
+                    f"{v['model']}: {'NOVEL' if v['is_novel'] else 'duplicate'} — {v['reasoning']}"
+                    for v in usable)[:2000]
+                similar_to = next((v["similar_to"] for v in usable if v.get("similar_to")), None)
+                if verbose:
+                    logger.info(f"    Panel: {yes}/{len(usable)} novel -> "
+                                f"{'ACCEPT' if is_novel else 'REJECT'}")
+            else:
+                response = self.llm.generate_json(
+                    prompt=prompt,
+                    system=system,
+                    temperature=self.temperature,
+                )
 
-            if verbose:
-                logger.debug(f"    LLM Response: {response}")
+                if verbose:
+                    logger.debug(f"    LLM Response: {response}")
 
-            is_novel = response.get("is_novel", False)
-            reasoning = response.get("reasoning", "No reasoning provided")
-            similar_to = response.get("similar_to", None)
+                is_novel = response.get("is_novel", False)
+                reasoning = response.get("reasoning", "No reasoning provided")
+                similar_to = response.get("similar_to", None)
 
             stage = "stage2_accept" if is_novel else "stage2_reject"
 
@@ -389,6 +426,7 @@ class NoveltyEvaluator:
                 most_similar_code=most_similar_code,
                 similar_to_accepted=True,  # Stage 2 only compares to accepted
                 reasoning=reasoning,
+                panel=panel_votes,
             )
 
         except Exception as e:
@@ -415,6 +453,36 @@ class NoveltyEvaluator:
             lines.append(f"   Definition: {code.definition}")
 
         return "\n".join(lines)
+
+    def _poll_panel(self, prompt: str, system: Optional[str], verbose: bool) -> list[dict]:
+        """Ask every judge the SAME prompt concurrently; one dict per judge, order preserved.
+
+        A judge that raises or returns an unusable payload contributes ``is_novel: None`` and is
+        excluded from the vote — never counted as either verdict.
+        """
+        import concurrent.futures as _cf
+
+        def ask(judge: BaseLLM) -> dict:
+            name = getattr(judge, "model_name", None) or getattr(judge, "model", repr(judge))
+            try:
+                r = judge.generate_json(prompt=prompt, system=system,
+                                        temperature=self.temperature) or {}
+                v = r.get("is_novel")
+                if not isinstance(v, bool):
+                    return {"model": name, "is_novel": None,
+                            "reasoning": f"unusable payload: {str(r)[:160]}", "similar_to": None}
+                return {"model": name, "is_novel": v,
+                        "reasoning": str(r.get("reasoning", ""))[:600],
+                        "similar_to": r.get("similar_to")}
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"    panel judge {name} failed: {type(e).__name__}: {e}")
+                return {"model": name, "is_novel": None,
+                        "reasoning": f"{type(e).__name__}: {str(e)[:160]}", "similar_to": None}
+
+        if len(self.judges) == 1:
+            return [ask(self.judges[0])]
+        with _cf.ThreadPoolExecutor(max_workers=self.panel_max_workers) as ex:
+            return list(ex.map(ask, self.judges))
 
     def _format_similar_codes_with_status(
         self,
