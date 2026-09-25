@@ -183,6 +183,20 @@ class NoveltyEvaluator:
             code_text = f"{code.name}: {code.definition}"
             code.embedding = self.embedder.embed(code_text)
 
+        # Codebook codes without embeddings are INVISIBLE to both stages: Stage 1's similarity
+        # check and Stage 2's retrieval of similar codes skip them silently. A codebook assembled
+        # from saved codes (rather than grown through evaluate()) therefore looked empty to the
+        # judge — every candidate was shown "No similar codes in codebook yet" and was accepted
+        # as novel (found 2026-09-25 in a codebook-merge experiment). Embed them here, with the
+        # same text form and embedder, so a pre-populated codebook behaves like a grown one.
+        missing = [c for c in list(codebook.accepted_codes) + list(codebook.rejected_codes)
+                   if c.embedding is None]
+        if missing:
+            vecs = self.embedder.embed([f"{c.name}: {c.definition}" for c in missing])
+            for c, v in zip(missing, vecs):
+                c.embedding = v
+            logger.info(f"  Embedded {len(missing)} codebook code(s) that had no embedding")
+
         # Increment evaluation counter
         self._evaluation_counter += 1
         code.evaluation_order = self._evaluation_counter

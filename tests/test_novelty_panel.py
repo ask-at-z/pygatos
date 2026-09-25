@@ -101,3 +101,17 @@ def test_every_judge_sees_the_same_prompt():
     pa = a.generate_json.call_args.kwargs["prompt"]
     pb = b.generate_json.call_args.kwargs["prompt"]
     assert pa == pb and "Candidate" in pa
+
+
+def test_prepopulated_codebook_without_embeddings_is_visible_to_the_gate():
+    """A codebook built from saved codes (no embeddings) must not look empty to the judge."""
+    judge_ = judge(False, name="a")
+    ev = NoveltyEvaluator(llm=judge_, embedder=FakeEmbedder(), similarity_threshold=1.01,
+                          policy="keep-unless-duplicate")
+    cb = Codebook()
+    cb.add_code(Code(name="Existing", definition="An existing code."), accepted=True)
+    assert cb.accepted_codes[0].embedding is None          # the state that used to be skipped
+    ev.evaluate(Code(name="Candidate", definition="A candidate code."), cb)
+    prompt = judge_.generate_json.call_args.kwargs["prompt"]
+    assert "No similar codes in codebook yet" not in prompt
+    assert "Existing" in prompt
